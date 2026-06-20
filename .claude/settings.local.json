@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:aimchess.com)",
+      "WebFetch(domain:www.chess.com)",
+      "WebSearch",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('chessstats/engine.py'\\).read\\(\\)\\); print\\('engine.py OK'\\)\")",
+      "Bash(node --check static/app.js)"
+    ]
+  }
+}

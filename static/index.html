@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Chess Stats — your chess.com coach</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">♟ <span>Chess Stats</span></div>
+    <form id="search" class="search">
+      <input id="username" type="text" placeholder="chess.com username" autocomplete="off" />
+      <select id="limit" title="Games to analyze">
+        <option value="30">30 games</option>
+        <option value="60" selected>60 games</option>
+        <option value="120">120 games</option>
+        <option value="200">200 games</option>
+      </select>
+      <select id="timeclass" title="Time control">
+        <option value="">All time controls</option>
+        <option value="bullet">Bullet</option>
+        <option value="blitz">Blitz</option>
+        <option value="rapid">Rapid</option>
+        <option value="daily">Daily</option>
+      </select>
+      <label class="enginechk" title="Requires Stockfish installed locally">
+        <input id="engine" type="checkbox" /> Deep (Stockfish)
+      </label>
+      <button type="submit">Analyze</button>
+    </form>
+  </header>
+
+  <main id="main">
+    <section id="empty" class="empty">
+      <h1>Analyze your chess.com games</h1>
+      <p>Enter a username to get skill scores, an opening breakdown, time-management
+         insights, and personalized tips — inspired by Aimchess, powered by the
+         free chess.com API.</p>
+      <div class="hint">Try a username like <code>hikaru</code> or your own.</div>
+    </section>
+
+    <section id="loading" class="hidden loading">
+      <div class="spinner"></div>
+      <p id="loadtext">Fetching games…</p>
+    </section>
+
+    <section id="error" class="hidden errorbox"></section>
+
+    <section id="report" class="hidden">
+      <!-- player header -->
+      <div class="playerhead card">
+        <img id="avatar" class="avatar" alt="" />
+        <div class="playermeta">
+          <h2 id="pname"></h2>
+          <div id="pratings" class="ratings"></div>
+        </div>
+        <div class="overallring">
+          <canvas id="overallGauge" width="120" height="120"></canvas>
+          <div class="overalllabel"><span id="overallScore">–</span><small>overall</small></div>
+        </div>
+      </div>
+
+      <div class="grid2">
+        <div class="card">
+          <h3>Skill profile</h3>
+          <canvas id="radar" height="260"></canvas>
+        </div>
+        <div class="card clickable" id="recordCard" title="Win rate breakdown">
+          <h3>Record <span class="hintsm">— click for win-rate detail ›</span></h3>
+          <div id="record" class="record"></div>
+          <h3 class="mt">Rating trend</h3>
+          <canvas id="rating" height="120"></canvas>
+        </div>
+      </div>
+
+      <h3 class="sectionhead">Skills <span class="hintsm">— click any card for an in-depth breakdown</span></h3>
+      <div id="skills" class="skillgrid"></div>
+
+      <div class="grid2">
+        <div class="card">
+          <h3>Openings</h3>
+          <div id="openings"></div>
+        </div>
+        <div class="card">
+          <h3>Personalized tips</h3>
+          <div id="tips"></div>
+        </div>
+      </div>
+
+      <h3 class="sectionhead">Recent games <span class="hintsm">— click “Review” for a move-by-move engine breakdown</span></h3>
+      <div class="card">
+        <div id="gameslist"></div>
+      </div>
+
+      <p id="metafoot" class="metafoot"></p>
+      <div id="warmbadge" class="warmbadge hidden"></div>
+    </section>
+
+    <!-- game review overlay -->
+    <div id="review" class="review hidden">
+      <div class="reviewbar">
+        <div id="reviewtitle" class="reviewtitle"></div>
+        <button id="reviewClose" class="modalclose" aria-label="Close">×</button>
+      </div>
+      <div class="reviewbody">
+        <div class="reviewleft">
+          <div class="boardwrap">
+            <div id="evalbar" class="evalbar"><span id="evalfill"></span></div>
+            <div id="board" class="board"></div>
+          </div>
+          <div class="boardnav">
+            <button id="navFirst" title="Start">⏮</button>
+            <button id="navPrev" title="Previous (←)">‹</button>
+            <span id="navLabel" class="navlabel"></span>
+            <button id="navNext" title="Next (→)">›</button>
+            <button id="navLast" title="End">⏭</button>
+          </div>
+          <div id="summarybar" class="summarybar"></div>
+        </div>
+        <div class="reviewright">
+          <div id="movelist" class="movelist"></div>
+          <div id="moveinfo" class="moveinfo"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- skill drill-down modal -->
+    <div id="modal" class="modal hidden">
+      <div class="modalcard">
+        <button id="modalClose" class="modalclose" aria-label="Close">×</button>
+        <h2 id="modalTitle"></h2>
+        <div class="modalgrid">
+          <div class="modalchart"><canvas id="modalCanvas"></canvas><div id="modalExtra"></div></div>
+          <div class="modalside">
+            <h4 id="modalInterpH">Interpretation</h4>
+            <div id="modalInterp"></div>
+            <h4 id="modalImproveH" class="mt">How to improve</h4>
+            <ul id="modalImprove" class="improvelist"></ul>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

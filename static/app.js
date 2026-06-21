@@ -14,18 +14,37 @@ function scoreColor(s) {
   return COLORS.bad;
 }
 
+let VIEW = "analysis";          // "analysis" | "practice"
+let ANALYSIS_STATE = "empty";   // which analysis sub-section is active
+
 function show(id) {
+  ANALYSIS_STATE = id;
   ["empty", "loading", "error", "report"].forEach((s) =>
-    $(s).classList.toggle("hidden", s !== id)
+    $(s).classList.toggle("hidden", VIEW !== "analysis" || s !== id)
   );
 }
 
+function setView(v) {
+  VIEW = v;
+  const practice = v === "practice";
+  $("practice").classList.toggle("hidden", !practice);
+  $("tabAnalysis").classList.toggle("active", !practice);
+  $("tabPractice").classList.toggle("active", practice);
+  show(ANALYSIS_STATE);          // re-applies hidden state for analysis sections
+  if (practice) loadPractice();
+}
+
+$("tabAnalysis").onclick = () => setView("analysis");
+$("tabPractice").onclick = () => setView("practice");
+
 $("search").addEventListener("submit", (e) => {
   e.preventDefault();
+  setView("analysis");
   runReport();
 });
 
 let CURRENT_USER = "";
+let LAST_REPORT = null;
 
 async function runReport() {
   const username = $("username").value.trim().replace(/^@/, "");
@@ -64,6 +83,7 @@ let DETAILS = null;
 let detailChart = null;
 
 function render(d) {
+  LAST_REPORT = d;
   DETAILS = d.details || {};
   renderPlayer(d.player, d.overall_skill);
   renderRecord(d.overall);
@@ -598,7 +618,7 @@ async function openReview(uuid) {
     $("reviewtitle").innerHTML = `${w} vs ${b} · <span style="color:var(--muted)">${d.opening_name} · depth ${d.depth} · your ACPL ${d.acpl}</span>`;
     renderSummary(d.summary);
     renderMoveList(d.moves);
-    gotoPly(d.moves.length);  // jump to final position
+    gotoPly(0);  // start from the beginning of the game
   } catch (e) {
     $("reviewtitle").textContent = "Review failed";
     $("movelist").innerHTML = `<div class="errorbox">⚠ ${e.message}</div>`;
@@ -606,7 +626,7 @@ async function openReview(uuid) {
 }
 
 function renderSummary(sum) {
-  const order = ["Best", "Excellent", "Good", "Book", "Inaccuracy", "Mistake", "Blunder"];
+  const order = ["Best", "Excellent", "Good", "Book", "Inaccuracy", "Mistake", "Miss", "Blunder"];
   $("summarybar").innerHTML = order.filter((k) => sum[k]).map((k) =>
     `<span class="chip cls-${k}">${sum[k]} ${k}</span>`).join("");
 }
@@ -650,17 +670,15 @@ function fenToBoard(fen, hl) {
   $("board").innerHTML = html;
 }
 
-// Center of a square (e.g. "e4") in board units, where the board is 8x8.
-function sqCenter(name) {
-  const f = "abcdefgh".indexOf(name[0]);
-  const rank = +name[1];
-  return { x: f + 0.5, y: (8 - rank) + 0.5 };
+// Center of a square (e.g. "e4") in board units (8x8), honoring board flip.
+function squareCenterXY(name, flip) {
+  const f = "abcdefgh".indexOf(name[0]), rank = +name[1];
+  return { x: (flip ? 7 - f : f) + 0.5, y: (flip ? rank - 1 : 8 - rank) + 0.5 };
 }
 
-// Overlay best-move suggestion arrows on the board. arrows: [{from,to,color}].
-function drawArrows(arrows) {
-  const board = $("board");
-  const prev = board.querySelector("svg.arrows");
+// Overlay arrows on a board element. arrows: [{from,to,color}]; flip for black POV.
+function drawArrowsOn(boardEl, arrows, flip) {
+  const prev = boardEl.querySelector("svg.arrows");
   if (prev) prev.remove();
   if (!arrows || !arrows.length) return;
   const NS = "http://www.w3.org/2000/svg";
@@ -669,7 +687,7 @@ function drawArrows(arrows) {
   svg.setAttribute("viewBox", "0 0 8 8");
   svg.setAttribute("preserveAspectRatio", "none");
   for (const a of arrows) {
-    const p0 = sqCenter(a.from), p1 = sqCenter(a.to);
+    const p0 = squareCenterXY(a.from, flip), p1 = squareCenterXY(a.to, flip);
     const dx = p1.x - p0.x, dy = p1.y - p0.y;
     const len = Math.hypot(dx, dy) || 1;
     const ux = dx / len, uy = dy / len;     // unit direction
@@ -689,8 +707,11 @@ function drawArrows(arrows) {
     headEl.setAttribute("fill", a.color);
     svg.appendChild(line); svg.appendChild(headEl);
   }
-  board.appendChild(svg);
+  boardEl.appendChild(svg);
 }
+
+// Review board is always shown from White's perspective.
+const drawArrows = (arrows) => drawArrowsOn($("board"), arrows, false);
 
 function gotoPly(ply) {
   if (!REVIEW) return;
@@ -730,9 +751,12 @@ function renderMoveInfo(m) {
   const evalP = (m.eval / 100).toFixed(1);
   const who = m.is_user ? "You" : "Opponent";
   const hasLine = m.best_line && m.best_line.length;
+  const chips = hasLine
+    ? m.best_line.map((san, i) => `<span class="lnmv" data-i="${i}">${san}</span>`).join(" ")
+    : "";
   const lineBlock = hasLine
     ? `<button id="lineBtn" class="linebtn">Show engine line ▸</button>
-       <div id="engineLine" class="line hidden">Engine line: <b>${m.best_san}</b> ${m.best_line.slice(1).join(" ")}</div>`
+       <div id="engineLine" class="line hidden">Engine line — click a move to play it on the board: ${chips}</div>`
     : "";
   const body = m.explanation
     ? m.explanation
@@ -747,7 +771,28 @@ function renderMoveInfo(m) {
   if (lineBtn) lineBtn.onclick = () => {
     const hidden = $("engineLine").classList.toggle("hidden");
     lineBtn.textContent = hidden ? "Show engine line ▸" : "Hide engine line ▾";
+    if (hidden) gotoPly(REVIEW_PLY);   // restore the actual game position
+    else previewLine(0);               // illustrate the line from its first move
   };
+  document.querySelectorAll("#engineLine .lnmv").forEach((el) =>
+    el.onclick = () => previewLine(+el.dataset.i));
+}
+
+// Play the engine's suggested line out on the board: show the position after
+// line-move `idx`, with an arrow for that move. Driven by the engine-line chips.
+function previewLine(idx) {
+  if (!REVIEW || REVIEW_PLY === 0) return;
+  const m = REVIEW.moves[REVIEW_PLY - 1];
+  const fens = m && m.best_line_fens, ucis = m && m.best_line_uci;
+  if (!fens || !fens.length) return;
+  idx = Math.max(0, Math.min(fens.length - 1, idx));
+  fenToBoard(fens[idx], null);
+  const u = ucis[idx];
+  drawArrows([{ from: u.slice(0, 2), to: u.slice(2, 4), color: "#6ea8df" }]);
+  // eval bar follows the line position (engine eval ~ move m's "before" eval).
+  document.querySelectorAll("#engineLine .lnmv").forEach((el) =>
+    el.classList.toggle("on", +el.dataset.i === idx));
+  $("navLabel").textContent = `Engine line: ${m.best_line.slice(0, idx + 1).join(" ")}`;
 }
 
 $("navFirst").onclick = () => gotoPly(0);
@@ -760,6 +805,177 @@ document.addEventListener("keydown", (e) => {
   else if (e.key === "ArrowRight") { gotoPly(REVIEW_PLY + 1); e.preventDefault(); }
   else if (e.key === "Escape") closeReview();
 });
+
+/* ===================== early/mid-game practice ===================== */
+let P_DRILLS = [], P_IDX = 0, P_SEL = null, P_DONE = false, P_FLIP = false;
+let P_SCORE = { good: 0, total: 0 };
+let P_ENGINE_OK = true, practiceLoaded = false;
+
+async function loadPractice() {
+  renderPersonal();                     // refresh from the latest report each visit
+  if (practiceLoaded) return;
+  try {
+    const r = await fetch("/api/practice");
+    const d = await r.json();
+    P_ENGINE_OK = !!d.engine_available;
+    renderGuide(d.guide);
+    startDrills(d.drills);
+    practiceLoaded = true;
+  } catch (e) {
+    $("guide").innerHTML = `<div class="errorbox">⚠ Could not load practice content.</div>`;
+  }
+}
+
+function renderGuide(guide) {
+  $("guide").innerHTML = guide.map((g) => `
+    <div class="card guidecard">
+      <h4><span class="gicon">${g.icon}</span> ${g.title}</h4>
+      <p class="gblurb">${g.blurb}</p>
+      <ul class="glist">${g.items.map((it) => `<li>${it}</li>`).join("")}</ul>
+    </div>`).join("");
+}
+
+// Personalize the guide from the user's last analyzed report, if any.
+function renderPersonal() {
+  const box = $("practicePersonal");
+  if (!LAST_REPORT || !LAST_REPORT.skills) { box.innerHTML = ""; return; }
+  const scored = LAST_REPORT.skills.filter((s) => typeof s.score === "number");
+  const weak = scored.slice().sort((a, b) => a.score - b.score)[0];
+  const op = LAST_REPORT.skills.find((s) => s.key === "openings");
+  const worst = op && op.stats && op.stats.worst_opening;
+  const tips = [];
+  if (weak) tips.push(`Your lowest skill area is <b>${weak.label}</b> (${weak.score}) — keep its habits in mind while you drill.`);
+  if (worst) tips.push(`Your toughest opening lately is <b>${worst.name}</b> (${worst.score_pct}% score) — revisit its plans below.`);
+  if (!tips.length) { box.innerHTML = ""; return; }
+  box.innerHTML = `<div class="card personalcard">
+      <h4>For you, @${LAST_REPORT.player.username}</h4>${tips.map((t) => `<p>${t}</p>`).join("")}</div>`;
+}
+
+function startDrills(drills) {
+  P_DRILLS = drills || [];
+  P_IDX = 0; P_SCORE = { good: 0, total: 0 };
+  if (!P_DRILLS.length) { $("drillCard").innerHTML = "<p>No drills available.</p>"; return; }
+  loadDrill(0);
+}
+
+function fenPieces(fen) {
+  const map = {}, rows = fen.split(" ")[0].split("/");
+  for (let r = 0; r < 8; r++) {
+    let file = 0; const rank = 8 - r;
+    for (const ch of rows[r]) {
+      if (/\d/.test(ch)) file += +ch;
+      else { map["abcdefgh"[file] + rank] = ch; file++; }
+    }
+  }
+  return map;
+}
+
+function renderPBoard(fen, flip) {
+  const map = fenPieces(fen);
+  let html = "";
+  for (let dr = 0; dr < 8; dr++) {
+    for (let dc = 0; dc < 8; dc++) {
+      const file = flip ? 7 - dc : dc;          // 0..7 (a..h)
+      const rank = flip ? dr + 1 : 8 - dr;      // 1..8
+      const name = "abcdefgh"[file] + rank;
+      const ch = map[name];
+      const dark = ((8 - rank) + file) % 2 === 1;
+      const sel = name === P_SEL ? " psel" : "";
+      const inner = ch ? `<span class="pc ${ch === ch.toUpperCase() ? "white" : "black"}">${PIECES[ch]}</span>` : "";
+      html += `<div class="sq ${dark ? "dark" : "light"}${sel}" data-sq="${name}">${inner}</div>`;
+    }
+  }
+  const el = $("pboard");
+  el.innerHTML = html;
+  el.querySelectorAll(".sq").forEach((s) => s.onclick = () => pSquareClick(s.dataset.sq));
+}
+
+function loadDrill(i) {
+  P_IDX = i; P_SEL = null; P_DONE = false;
+  const d = P_DRILLS[i];
+  P_FLIP = d.side === "black";
+  renderPBoard(d.fen, P_FLIP);
+  $("drillCounter").textContent = `Position ${i + 1} / ${P_DRILLS.length}`;
+  $("drillTheme").textContent = d.theme;
+  $("drillScore").textContent = P_SCORE.total ? `Score ${P_SCORE.good}/${P_SCORE.total}` : "";
+  $("drillTurn").innerHTML = `<span class="turndot ${d.side}"></span>${d.side === "white" ? "White" : "Black"} to move — that's you. Click a piece, then its destination.`;
+  $("drillPrompt").innerHTML = `<b>${d.prompt}</b>`;
+  $("drillFeedback").innerHTML = P_ENGINE_OK ? ""
+    : `<div class="warnnote">⚙ Stockfish isn't installed, so moves can't be graded. Install it to enable drill feedback.</div>`;
+  $("drillHint").classList.toggle("hidden", !P_ENGINE_OK);
+  $("drillReset").classList.add("hidden");
+  $("drillNext").classList.add("hidden");
+}
+
+function pSquareClick(sq) {
+  if (P_DONE || !P_ENGINE_OK) return;
+  const d = P_DRILLS[P_IDX];
+  const map = fenPieces(d.fen);
+  const sideWhite = d.side === "white";
+  const own = (s) => map[s] && (map[s] === map[s].toUpperCase()) === sideWhite;
+  if (P_SEL === null) {
+    if (!own(sq)) return;                 // must pick one of your own pieces
+    P_SEL = sq; renderPBoard(d.fen, P_FLIP); return;
+  }
+  if (sq === P_SEL) { P_SEL = null; renderPBoard(d.fen, P_FLIP); return; }
+  if (own(sq)) { P_SEL = sq; renderPBoard(d.fen, P_FLIP); return; }  // reselect
+  let uci = P_SEL + sq;
+  if (map[P_SEL].toLowerCase() === "p" && (sq[1] === "8" || sq[1] === "1")) uci += "q";
+  submitDrill(uci);
+}
+
+async function submitDrill(uci) {
+  const d = P_DRILLS[P_IDX];
+  $("drillFeedback").innerHTML = `<div class="loading" style="padding:14px"><div class="spinner"></div>Grading…</div>`;
+  try {
+    const r = await fetch(`/api/practice/grade?fen=${encodeURIComponent(d.fen)}&move=${uci}`);
+    const g = await r.json();
+    if (!r.ok) {
+      $("drillFeedback").innerHTML = `<div class="warnnote">${(g && g.detail) || "Illegal move — try again."}</div>`;
+      P_SEL = null; renderPBoard(d.fen, P_FLIP);
+      return;
+    }
+    P_DONE = true; P_SEL = null;
+    const ok = ["Best", "Excellent", "Good", "Book"].includes(g.cls);
+    P_SCORE.total++; if (ok) P_SCORE.good++;
+    renderPBoard(d.fen, P_FLIP);
+    const arrows = [{ from: uci.slice(0, 2), to: uci.slice(2, 4), color: ok ? "#7cc66e" : "#e0934a" }];
+    if (g.best_uci && g.best_uci !== g.played_uci)
+      arrows.push({ from: g.best_uci.slice(0, 2), to: g.best_uci.slice(2, 4), color: "#6ea8df" });
+    drawArrowsOn($("pboard"), arrows, P_FLIP);
+    renderDrillFeedback(g, d, ok);
+    $("drillScore").textContent = `Score ${P_SCORE.good}/${P_SCORE.total}`;
+    $("drillHint").classList.add("hidden");
+    $("drillReset").classList.remove("hidden");
+    $("drillNext").classList.remove("hidden");
+    $("drillNext").textContent = P_IDX >= P_DRILLS.length - 1 ? "Restart ↻" : "Next position ›";
+  } catch (e) {
+    $("drillFeedback").innerHTML = `<div class="warnnote">⚠ ${e.message}</div>`;
+  }
+}
+
+function renderDrillFeedback(g, d, ok) {
+  const ev = (g.eval_after / 100);
+  const evalTxt = `${ev >= 0 ? "+" : ""}${ev.toFixed(1)}`;
+  const showBest = g.best_uci && g.best_uci !== g.played_uci;
+  const legend = `<div class="alegend"><span class="adot warn"></span>your move${
+    showBest ? `<span class="adot best"></span>engine's pick (${g.best_san})` : ""}</div>`;
+  $("drillFeedback").innerHTML = `
+    <div class="fbhead"><span class="tag cls-${g.cls}">${g.cls}</span> <b>${g.played_san}</b>
+      <span class="fbeval">eval ${evalTxt}</span></div>
+    <div class="fbbody">${g.comment}</div>
+    <div class="fbprinciple"><b>Why this matters:</b> ${d.principle}</div>
+    ${showBest ? legend : ""}`;
+}
+
+$("drillHint").onclick = () => {
+  $("drillFeedback").innerHTML = `<div class="hintnote">💡 ${P_DRILLS[P_IDX].hint}</div>`;
+};
+$("drillReset").onclick = () => loadDrill(P_IDX);
+$("drillNext").onclick = () => {
+  if (P_IDX >= P_DRILLS.length - 1) { P_SCORE = { good: 0, total: 0 }; loadDrill(0); }
+  else loadDrill(P_IDX + 1);
+};
 
 // Allow ?u=username deep links.
 const pre = new URLSearchParams(location.search).get("u");

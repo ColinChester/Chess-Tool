@@ -47,8 +47,57 @@ def _clamp(cp: int) -> int:
     return max(-CLAMP, min(CLAMP, cp))
 
 
+# Point value of each piece, for naming the material a tactic wins/loses.
+PIECE_PTS = {chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3,
+             chess.ROOK: 5, chess.QUEEN: 9}
+PIECE_NAME = {chess.PAWN: "pawn", chess.KNIGHT: "knight", chess.BISHOP: "bishop",
+              chess.ROOK: "rook", chess.QUEEN: "queen"}
+
+
+def _material(board: chess.Board) -> int:
+    """Material balance in points, from White's perspective."""
+    bal = 0
+    for p in board.piece_map().values():
+        v = PIECE_PTS.get(p.piece_type, 0)
+        bal += v if p.color == chess.WHITE else -v
+    return bal
+
+
+def _line_material_swing(board: chess.Board, pv: List[chess.Move]) -> int:
+    """Material the side-to-move at `board` nets after playing out `pv` (points)."""
+    mover = board.turn
+    before = _material(board)
+    b = board.copy()
+    for mv in pv:
+        if mv not in b.legal_moves:
+            break
+        b.push(mv)
+    swing = _material(b) - before               # White's perspective
+    return swing if mover == chess.WHITE else -swing
+
+
+def _first_capture(board: chess.Board, pv: List[chess.Move]):
+    """(san, captured-piece-name) of the first capturing move in `pv`, else None."""
+    b = board.copy()
+    for mv in pv:
+        if mv not in b.legal_moves:
+            break
+        if b.is_capture(mv):
+            victim = b.piece_at(mv.to_square)
+            name = PIECE_NAME.get(victim.piece_type) if victim else "pawn"  # ep -> pawn
+            try:
+                san = b.san(mv)
+            except Exception:
+                san = mv.uci()
+            return san, name
+        b.push(mv)
+    return None
+
+
 # Move classifications (centipawn-loss based), chess.com-flavored.
-def classify_move(loss: int, is_best: bool, ply: int, in_opening: bool) -> str:
+def classify_move(loss: int, is_best: bool, ply: int, in_opening: bool,
+                  before_mover: Optional[int] = None,
+                  after_mover: Optional[int] = None) -> str:
     if is_best:
         return "Best"
     if in_opening and ply < 12 and loss < 30:
@@ -57,6 +106,11 @@ def classify_move(loss: int, is_best: bool, ply: int, in_opening: bool) -> str:
         return "Excellent"
     if loss < 50:
         return "Good"
+    # "Miss": a winning position thrown away — you were clearly ahead and the
+    # move squanders most of it. Takes precedence over Mistake/Blunder.
+    if (before_mover is not None and after_mover is not None
+            and before_mover >= 200 and after_mover < 100 and loss >= MISTAKE):
+        return "Miss"
     if loss < 100:
         return "Inaccuracy"
     if loss < 200:
@@ -64,31 +118,48 @@ def classify_move(loss: int, is_best: bool, ply: int, in_opening: bool) -> str:
     return "Blunder"
 
 
-def explain_move(cls: str, loss: int, before_w: int, after_w: int, side_white: bool,
-                 played_san: str, best_san: Optional[str], best_is_capture: bool,
-                 best_is_check: bool, opp_capture_san: Optional[str]) -> Optional[str]:
-    """A short, data-grounded note on why a move was good or bad."""
-    bm = (before_w if side_white else -before_w) / 100      # mover's perspective, pawns
-    am = (after_w if side_white else -after_w) / 100
-    if cls in ("Inaccuracy", "Mistake", "Blunder"):
-        sev = {"Inaccuracy": "inaccurate", "Mistake": "a mistake", "Blunder": "a blunder"}[cls]
-        parts = [f"{played_san} is {sev}, giving up about {loss / 100:.1f} pawns."]
+def explain_move(cls: str, loss: int, before_mover: int, after_mover: int,
+                 played_san: str, best_san: Optional[str], signals: dict) -> Optional[str]:
+    """A short, data-grounded note on why a move was good or bad. Evals are in
+    centipawns from the moving side's perspective. `signals` carries facts mined
+    from the engine's principal variations (see review_game)."""
+    bm, am = before_mover / 100, after_mover / 100      # pawns, mover's side
+
+    if cls in ("Inaccuracy", "Mistake", "Blunder", "Miss"):
+        sev = {"Inaccuracy": "inaccurate", "Mistake": "a mistake",
+               "Blunder": "a blunder", "Miss": "a missed win"}[cls]
+        lead = (f"{played_san} throws away a winning position"
+                if cls == "Miss" else f"{played_san} is {sev}")
+        parts = [f"{lead}, giving up about {loss / 100:.1f} pawns."]
+
+        # Why it's bad: concrete consequence the engine sees after this move.
+        if signals.get("allows_mate"):
+            parts.append(f"It walks into a forced mate in {signals['allows_mate']}.")
+        elif signals.get("opp_wins"):
+            reply_san, victim, pawns = signals["opp_wins"]
+            pts = round(pawns)
+            unit = "pawn" if pts == 1 else "pawns"
+            parts.append(f"After {reply_san} the opponent wins about {pts} {unit} of material.")
+
+        # The better choice, and what it would have done.
         if best_san:
-            extra = ""
-            if best_is_capture and best_is_check:
-                extra = " — a capture with check"
-            elif best_is_capture:
-                extra = ", winning material"
-            elif best_is_check:
-                extra = ", with check"
-            parts.append(f"Stockfish preferred {best_san}{extra}.")
-        parts.append(f"The evaluation swings from {bm:+.1f} to {am:+.1f} (your side).")
-        if opp_capture_san and cls in ("Mistake", "Blunder"):
-            parts.append(f"It allows {opp_capture_san}, winning material.")
+            if signals.get("best_mates"):
+                parts.append(f"Stockfish had {best_san}, forcing mate in {signals['best_mates']}.")
+            elif signals.get("best_wins_material", 0) >= 1:
+                parts.append(f"Stockfish preferred {best_san}, winning material.")
+            elif signals.get("best_is_check"):
+                parts.append(f"Stockfish preferred {best_san}, with check.")
+            else:
+                parts.append(f"Stockfish preferred {best_san}.")
+
+        parts.append(f"The evaluation swings from {bm:+.1f} to {am:+.1f} for the side that moved.")
         return " ".join(parts)
-    if cls == "Best" and (best_is_capture or best_is_check or abs(am) >= 1.5):
-        why = "captures material" if best_is_capture else (
-              "gives a strong check" if best_is_check else "keeps your edge")
+
+    if cls == "Best" and (signals.get("best_is_capture") or signals.get("best_is_check")
+                          or abs(am) >= 1.5):
+        why = ("captures material" if signals.get("best_is_capture")
+               else "gives a strong check" if signals.get("best_is_check")
+               else "keeps your edge")
         return f"Best move — {played_san} {why} ({am:+.1f})."
     return None
 
@@ -296,6 +367,7 @@ class EngineAnalyzer:
 
         engine = self._chess_engine.SimpleEngine.popen_uci(self.path)
         white_eval: List[int] = []
+        white_mate: List[Optional[int]] = []   # signed mate distance, White POV
         best_move: List[Optional[chess.Move]] = []
         pvs: List[List[chess.Move]] = []
         try:
@@ -306,12 +378,15 @@ class EngineAnalyzer:
                     white_eval.append(
                         (CLAMP if oc.winner == chess.WHITE else -CLAMP)
                         if (oc and oc.winner is not None) else 0)
+                    white_mate.append(None)
                     best_move.append(None)
                     pvs.append([])
                 else:
                     info = engine.analyse(board, self._chess_engine.Limit(depth=depth))
-                    sc = info["score"].white().score(mate_score=CLAMP)
+                    white_score = info["score"].white()
+                    sc = white_score.score(mate_score=CLAMP)
                     white_eval.append(int(sc) if sc is not None else 0)
+                    white_mate.append(white_score.mate())
                     pv = list(info.get("pv", []))
                     best_move.append(pv[0] if pv else None)
                     pvs.append(pv[:6])
@@ -322,50 +397,75 @@ class EngineAnalyzer:
 
         out_moves = []
         counts = {c: 0 for c in
-                  ("Best", "Book", "Excellent", "Good", "Inaccuracy", "Mistake", "Blunder")}
+                  ("Best", "Book", "Excellent", "Good", "Inaccuracy", "Miss", "Mistake", "Blunder")}
         board = chess.Board()
         for i in range(n):
             side_white = (i % 2 == 0)
             before, after = _clamp(white_eval[i]), _clamp(white_eval[i + 1])
             loss = max(0, (before - after) if side_white else (after - before))
+            # Evals and mate distances from the moving side's perspective.
+            before_mover = before if side_white else -before
+            after_mover = after if side_white else -after
+            mate_before = (white_mate[i] if side_white else -white_mate[i]) \
+                if white_mate[i] is not None else None
+            mate_after = (white_mate[i + 1] if side_white else -white_mate[i + 1]) \
+                if white_mate[i + 1] is not None else None
             bm = best_move[i]
             played = moves[i]
             played_san = board.san(played)
             best_san = board.san(bm) if bm else None
             is_best = (bm is not None and bm == played)
-            best_is_capture = bool(bm and board.is_capture(bm))
-            best_is_check = bool(bm and board.gives_check(bm))
-            # best line in SAN
+
+            # Facts mined from the engine's principal variations.
+            signals = {
+                "best_is_capture": bool(bm and board.is_capture(bm)),
+                "best_is_check": bool(bm and board.gives_check(bm)),
+                # Did the engine's best line win material for the mover?
+                "best_wins_material": _line_material_swing(board, pvs[i]),
+                # Could the mover have forced mate but didn't?
+                "best_mates": (mate_before if (mate_before and mate_before > 0
+                               and not (mate_after and mate_after > 0)) else None),
+            }
+
+            # Engine's principal variation: SAN (for display) plus UCI + the FEN
+            # after each move, so the frontend can play the line out on the board.
             lb = board.copy()
-            best_line = []
+            best_line, best_line_uci, best_line_fens = [], [], []
             for mv in pvs[i]:
                 try:
-                    best_line.append(lb.san(mv)); lb.push(mv)
+                    san = lb.san(mv)
                 except Exception:
                     break
+                best_line.append(san)
+                best_line_uci.append(mv.uci())
+                lb.push(mv)
+                best_line_fens.append(lb.fen())
 
             board.push(played)  # board now at position i+1
-            # opponent's best reply as a capture (for "allows ..." explanations)
-            opp_capture_san = None
-            opp_bm = best_move[i + 1]
-            if opp_bm and board.is_capture(opp_bm):
-                try:
-                    opp_capture_san = board.san(opp_bm)
-                except Exception:
-                    opp_capture_san = None
+            # The opponent's refutation: does it walk into mate or lose material?
+            if mate_after is not None and mate_after < 0:
+                signals["allows_mate"] = abs(mate_after)
+            opp_pv = pvs[i + 1]
+            opp_swing = _line_material_swing(board, opp_pv)   # opponent's perspective
+            cap = _first_capture(board, opp_pv)
+            # Only claim "wins material" when the eval drop corroborates it; a raw
+            # PV count can over-read a mid-combination (recapture beyond horizon).
+            if cap and opp_swing >= 1 and opp_swing <= loss / 100 * 1.5 + 1:
+                signals["opp_wins"] = (cap[0], cap[1], float(opp_swing))
 
-            cls = classify_move(loss, is_best, i, bool(g.opening_name))
+            cls = classify_move(loss, is_best, i, bool(g.opening_name),
+                                before_mover, after_mover)
             counts[cls] = counts.get(cls, 0) + 1
             is_user = (side_white == user_white)
-            expl = explain_move(cls, loss, before, after, side_white, played_san,
-                                best_san, best_is_capture, best_is_check,
-                                opp_capture_san if is_user else None) if is_user else None
+            expl = explain_move(cls, loss, before_mover, after_mover, played_san,
+                                best_san, signals)
             out_moves.append({
                 "ply": i + 1, "move_no": i // 2 + 1, "side": "w" if side_white else "b",
                 "san": played_san, "uci": played.uci(), "fen": board.fen(),
                 "eval": after, "cpl": loss, "cls": cls, "is_user": is_user,
                 "best_san": best_san, "best_uci": bm.uci() if bm else None,
-                "best_line": best_line, "explanation": expl,
+                "best_line": best_line, "best_line_uci": best_line_uci,
+                "best_line_fens": best_line_fens, "explanation": expl,
             })
 
         user_counts = {c: 0 for c in counts}
@@ -381,4 +481,91 @@ class EngineAnalyzer:
             "user_color": "white" if user_white else "black", "result": g.user_result,
             "initial_eval": _clamp(white_eval[0]) if white_eval else 0,
             "moves": out_moves, "summary": user_counts, "acpl": acpl, "depth": depth,
+        }
+
+    def grade_move(self, fen: str, uci: str, depth: int = 14) -> Dict:
+        """Grade a single candidate move in a position (the practice trainer).
+
+        Evaluates the position, the engine's best move, and the move the player
+        chose, then classifies it and writes a short coaching note. Returns
+        {"error": ...} for an illegal/unreadable move instead of raising."""
+        try:
+            board = chess.Board(fen)
+        except Exception:
+            return {"error": "Could not read that position."}
+
+        try:
+            move = chess.Move.from_uci(uci)
+        except Exception:
+            return {"error": "Could not read that move."}
+        # Auto-promote to a queen if the player didn't specify a promotion piece.
+        if move not in board.legal_moves and len(uci) == 4:
+            promo = chess.Move.from_uci(uci + "q")
+            if promo in board.legal_moves:
+                move = promo
+        if move not in board.legal_moves:
+            return {"error": "That isn't a legal move here.", "illegal": True}
+
+        mover_white = board.turn == chess.WHITE
+        engine = self._chess_engine.SimpleEngine.popen_uci(self.path)
+        try:
+            info = engine.analyse(board, self._chess_engine.Limit(depth=depth))
+            before = info["score"].white().score(mate_score=CLAMP) or 0
+            pv = list(info.get("pv", []))
+            best = pv[0] if pv else None
+            best_san = board.san(best) if best else None
+            best_uci = best.uci() if best else None
+            best_line, lb = [], board.copy()
+            for mv in pv[:6]:
+                try:
+                    best_line.append(lb.san(mv)); lb.push(mv)
+                except Exception:
+                    break
+            signals = {
+                "best_is_capture": bool(best and board.is_capture(best)),
+                "best_is_check": bool(best and board.gives_check(best)),
+                "best_wins_material": _line_material_swing(board, pv[:6]),
+            }
+            played_san = board.san(move)
+            board.push(move)
+            info2 = engine.analyse(board, self._chess_engine.Limit(depth=depth))
+            after = info2["score"].white().score(mate_score=CLAMP) or 0
+            mate_after = info2["score"].white().mate()
+            opp_pv = list(info2.get("pv", []))[:6]
+        finally:
+            engine.quit()
+
+        before_c, after_c = _clamp(before), _clamp(after)
+        loss = max(0, (before_c - after_c) if mover_white else (after_c - before_c))
+        before_mover = before_c if mover_white else -before_c
+        after_mover = after_c if mover_white else -after_c
+        is_best = (best is not None and move == best)
+
+        # Consequence of the player's move: mate allowed / material lost.
+        mate_mover = (mate_after if mover_white else -mate_after) \
+            if mate_after is not None else None
+        if mate_mover is not None and mate_mover < 0:
+            signals["allows_mate"] = abs(mate_mover)
+        cap = _first_capture(board, opp_pv)
+        opp_swing = _line_material_swing(board, opp_pv)
+        if cap and opp_swing >= 1 and opp_swing <= loss / 100 * 1.5 + 1:
+            signals["opp_wins"] = (cap[0], cap[1], float(opp_swing))
+
+        cls = classify_move(loss, is_best, 99, False, before_mover, after_mover)
+        comment = explain_move(cls, loss, before_mover, after_mover, played_san,
+                               best_san, signals)
+        if not comment:
+            comment = {
+                "Best": f"{played_san} is the engine's top choice — excellent.",
+                "Excellent": f"{played_san} is excellent, right in line with the engine.",
+                "Good": f"{played_san} is a solid, principled move.",
+                "Book": f"{played_san} is a fine developing move.",
+            }.get(cls, f"{played_san} keeps the game roughly level.")
+
+        return {
+            "cls": cls, "loss": loss, "is_best": is_best,
+            "played_san": played_san, "played_uci": move.uci(),
+            "best_san": best_san, "best_uci": best_uci, "best_line": best_line,
+            "eval_before": before_mover, "eval_after": after_mover,
+            "comment": comment, "depth": depth,
         }

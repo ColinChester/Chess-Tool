@@ -20,6 +20,7 @@ from chessstats.chesscom import ChessComClient, ChessComError
 from chessstats.details import build_details, enrich_tips
 from chessstats.engine import EngineAnalyzer
 from chessstats.pgn import ParsedGame, parse_game
+from chessstats.practice import DRILLS, GUIDE
 
 BASE_DIR = Path(__file__).parent
 STATIC_DIR = BASE_DIR / "static"
@@ -227,6 +228,34 @@ def review(
     review["black"] = raw.get("black", {})
     review["time_class"] = raw.get("time_class")
     return review
+
+
+@app.get("/api/practice")
+def practice():
+    """Curated early/mid-game guide + drill positions (no account needed)."""
+    return {
+        "guide": GUIDE,
+        "drills": DRILLS,
+        "engine_available": EngineAnalyzer.create() is not None,
+    }
+
+
+@app.get("/api/practice/grade")
+def practice_grade(
+    fen: str = Query(..., min_length=10),
+    move: str = Query(..., min_length=4, max_length=5, description="UCI, e.g. e2e4"),
+    depth: int = Query(REVIEW_DEPTH, ge=8, le=20),
+):
+    """Grade a single move the player chose in a practice position."""
+    analyzer = EngineAnalyzer.create()
+    if analyzer is None:
+        raise HTTPException(status_code=503,
+                            detail="Stockfish is not installed; drills are unavailable.")
+    result = analyzer.grade_move(fen, move, depth=depth)
+    if result.get("error"):
+        code = 422 if result.get("illegal") else 400
+        raise HTTPException(status_code=code, detail=result["error"])
+    return result
 
 
 def _extract_ratings(stats: dict) -> Dict[str, dict]:

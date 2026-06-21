@@ -1,0 +1,11 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Engine analysis cache (regenerated at runtime)
+.cache/
+
+# Local Claude settings
+.claude/settings.local.json

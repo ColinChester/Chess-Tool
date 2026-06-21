@@ -32,6 +32,11 @@
     </form>
   </header>
 
+  <nav class="tabs">
+    <button id="tabAnalysis" class="tab active">Analysis</button>
+    <button id="tabPractice" class="tab">Practice</button>
+  </nav>
+
   <main id="main">
     <section id="empty" class="empty">
       <h1>Analyze your chess.com games</h1>
@@ -96,6 +101,42 @@
 
       <p id="metafoot" class="metafoot"></p>
       <div id="warmbadge" class="warmbadge hidden"></div>
+    </section>
+
+    <!-- early/mid-game practice -->
+    <section id="practice" class="hidden">
+      <h1 class="practicehead">Early & mid-game practice</h1>
+      <p class="practiceintro">Learn the fundamentals, then drill them: play a move
+        in each position and Stockfish grades it with coaching. No account needed.</p>
+
+      <div id="practicePersonal"></div>
+
+      <h3 class="sectionhead">Your game plan — fundamentals to follow</h3>
+      <div id="guide" class="guidegrid"></div>
+
+      <h3 class="sectionhead">Drills <span class="hintsm">— make a move on the board; the engine grades it</span></h3>
+      <div id="drillCard" class="card drillcard">
+        <div class="drillbar">
+          <span id="drillCounter" class="drillcounter"></span>
+          <span id="drillTheme" class="drilltheme"></span>
+          <span id="drillScore" class="drillscore"></span>
+        </div>
+        <div class="drillbody">
+          <div class="drillleft">
+            <div id="pboard" class="board pboard"></div>
+            <div id="drillTurn" class="drillturn"></div>
+          </div>
+          <div class="drillright">
+            <div id="drillPrompt" class="drillprompt"></div>
+            <div id="drillFeedback" class="drillfeedback"></div>
+            <div class="drillactions">
+              <button id="drillHint" class="btn-ghost">Show hint</button>
+              <button id="drillReset" class="btn-ghost hidden">Try again</button>
+              <button id="drillNext" class="btn-primary hidden">Next position ›</button>
+            </div>
+          </div>
+        </div>
+      </div>
     </section>
 
     <!-- game review overlay -->

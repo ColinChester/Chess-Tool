@@ -14,7 +14,7 @@ function scoreColor(s) {
   return COLORS.bad;
 }
 
-let VIEW = "analysis";          // "analysis" | "practice"
+let VIEW = "analysis";          // "analysis" | "practice" | "board"
 let ANALYSIS_STATE = "empty";   // which analysis sub-section is active
 
 function show(id) {
@@ -26,16 +26,19 @@ function show(id) {
 
 function setView(v) {
   VIEW = v;
-  const practice = v === "practice";
-  $("practice").classList.toggle("hidden", !practice);
-  $("tabAnalysis").classList.toggle("active", !practice);
-  $("tabPractice").classList.toggle("active", practice);
+  $("practice").classList.toggle("hidden", v !== "practice");
+  $("sandbox").classList.toggle("hidden", v !== "board");
+  $("tabAnalysis").classList.toggle("active", v === "analysis");
+  $("tabPractice").classList.toggle("active", v === "practice");
+  $("tabBoard").classList.toggle("active", v === "board");
   show(ANALYSIS_STATE);          // re-applies hidden state for analysis sections
-  if (practice) loadPractice();
+  if (v === "practice") loadPractice();
+  if (v === "board") initSandbox();
 }
 
 $("tabAnalysis").onclick = () => setView("analysis");
 $("tabPractice").onclick = () => setView("practice");
+$("tabBoard").onclick = () => setView("board");
 
 $("search").addEventListener("submit", (e) => {
   e.preventDefault();
@@ -976,6 +979,307 @@ $("drillNext").onclick = () => {
   if (P_IDX >= P_DRILLS.length - 1) { P_SCORE = { good: 0, total: 0 }; loadDrill(0); }
   else loadDrill(P_IDX + 1);
 };
+
+/* ===================== analysis board (sandbox) ===================== */
+const START_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+let S_INIT = false;
+let S_MODE = "setup";    // "setup" | "play"
+let S_MAP = {};          // setup-mode piece map {square: "P"|"k"|...}
+let S_TOOL = null;       // selected palette piece, "erase", or null
+let S_FEN = START_FEN;   // play-mode position
+let S_SEL = null;        // selected from-square in play mode
+let S_FLIP = false, S_BUSY = false, S_ENGINE_OK = true;
+let S_DRAG = null;       // square a drag started from
+let S_HIST = [];         // {label, cls, fenBefore, feedback}
+
+function initSandbox() {
+  if (S_INIT) return;
+  S_INIT = true;
+  S_MAP = fenPieces(START_FEN);
+  buildPalette();
+  bindSandbox();
+  renderSandbox();
+}
+
+function buildPalette() {
+  const tools = ["K", "Q", "R", "B", "N", "P", "k", "q", "r", "b", "n", "p"];
+  $("sPalette").innerHTML = tools.map((t) =>
+    `<button class="pal" data-t="${t}" title="Place: click a square"><span class="pc ${
+      t === t.toUpperCase() ? "white" : "black"}">${PIECES[t]}</span></button>`).join("") +
+    `<button class="pal" data-t="erase" title="Remove pieces">✖</button>`;
+  $("sPalette").querySelectorAll(".pal").forEach((b) => b.onclick = () => {
+    S_TOOL = S_TOOL === b.dataset.t ? null : b.dataset.t;
+    $("sPalette").querySelectorAll(".pal").forEach((el) =>
+      el.classList.toggle("on", el.dataset.t === S_TOOL));
+  });
+}
+
+function renderSBoard() {
+  const map = S_MODE === "setup" ? S_MAP : fenPieces(S_FEN);
+  let html = "";
+  for (let dr = 0; dr < 8; dr++) {
+    for (let dc = 0; dc < 8; dc++) {
+      const file = S_FLIP ? 7 - dc : dc;
+      const rank = S_FLIP ? dr + 1 : 8 - dr;
+      const name = "abcdefgh"[file] + rank;
+      const ch = map[name];
+      const dark = ((8 - rank) + file) % 2 === 1;
+      const sel = name === S_SEL ? " psel" : "";
+      const inner = ch ? `<span class="pc ${ch === ch.toUpperCase() ? "white" : "black"}" draggable="true">${PIECES[ch]}</span>` : "";
+      html += `<div class="sq ${dark ? "dark" : "light"}${sel}" data-sq="${name}">${inner}</div>`;
+    }
+  }
+  const el = $("sboard");
+  el.innerHTML = html;
+  el.querySelectorAll(".sq").forEach((s) => {
+    s.onclick = () => sSquareClick(s.dataset.sq);
+    s.ondragover = (e) => { if (S_DRAG) e.preventDefault(); };
+    s.ondrop = (e) => { e.preventDefault(); sDrop(s.dataset.sq); };
+  });
+  el.querySelectorAll(".sq .pc").forEach((pc) => {
+    const sq = pc.parentElement.dataset.sq;
+    pc.ondragstart = (e) => {
+      if (!sDragStart(sq)) { e.preventDefault(); return; }
+      e.dataTransfer.effectAllowed = "move";
+      try { e.dataTransfer.setData("text/plain", sq); } catch (_) { /* older browsers */ }
+      pc.parentElement.classList.add("psel");
+    };
+    // If the drop landed off the board (or was cancelled), just reset the view.
+    pc.ondragend = () => { if (S_DRAG) { S_DRAG = null; renderSBoard(); } };
+  });
+}
+
+function sDragStart(sq) {
+  if (S_MODE === "play") {
+    if (S_BUSY) return false;
+    const map = fenPieces(S_FEN);
+    const whiteToMove = S_FEN.split(" ")[1] === "w";
+    if (!map[sq] || (map[sq] === map[sq].toUpperCase()) !== whiteToMove) return false;
+    S_SEL = null;
+  }
+  S_DRAG = sq;
+  return true;
+}
+
+function sDrop(to) {
+  const from = S_DRAG;
+  S_DRAG = null;
+  if (!from || from === to) { renderSBoard(); return; }
+  if (S_MODE === "setup") {
+    S_MAP[to] = S_MAP[from];
+    delete S_MAP[from];
+    renderSBoard();
+    return;
+  }
+  if (S_BUSY) return;
+  const map = fenPieces(S_FEN);
+  let uci = from + to;
+  if (map[from] && map[from].toLowerCase() === "p" && (to[1] === "8" || to[1] === "1")) uci += "q";
+  submitSandboxMove(uci);
+}
+
+function renderSandbox() {
+  renderSBoard();
+  const setup = S_MODE === "setup";
+  $("sSetup").classList.toggle("hidden", !setup);
+  $("sPlayCtl").classList.toggle("hidden", setup);
+  $("sModeLabel").textContent = setup ? "Setup" : "Play";
+  updateSandboxBar();
+}
+
+function updateSandboxBar() {
+  if (S_MODE === "setup") {
+    $("sTurn").textContent = "Place pieces, then press “Play from here”";
+    $("sStatus").textContent = "";
+    return;
+  }
+  const w = S_FEN.split(" ")[1] === "w";
+  $("sTurn").innerHTML =
+    `<span class="turndot ${w ? "white" : "black"}"></span> ${w ? "White" : "Black"} to move`;
+  $("sFenOut").textContent = S_FEN;
+}
+
+function sNote(msg) {
+  $("sFeedback").innerHTML = `<div class="warnnote">${msg}</div>`;
+}
+
+function sSquareClick(sq) {
+  if (S_MODE === "setup") {
+    if (S_TOOL === "erase" || (!S_TOOL && S_MAP[sq]) || S_MAP[sq] === S_TOOL) delete S_MAP[sq];
+    else if (S_TOOL) S_MAP[sq] = S_TOOL;
+    renderSBoard();
+    return;
+  }
+  if (S_BUSY) return;
+  const map = fenPieces(S_FEN);
+  const whiteToMove = S_FEN.split(" ")[1] === "w";
+  const own = (s) => map[s] && (map[s] === map[s].toUpperCase()) === whiteToMove;
+  if (S_SEL === null) {
+    if (!own(sq)) return;               // pick up a piece of the side to move
+    S_SEL = sq; renderSBoard(); return;
+  }
+  if (sq === S_SEL) { S_SEL = null; renderSBoard(); return; }
+  if (own(sq)) { S_SEL = sq; renderSBoard(); return; }   // reselect
+  let uci = S_SEL + sq;
+  if (map[S_SEL].toLowerCase() === "p" && (sq[1] === "8" || sq[1] === "1")) uci += "q";
+  submitSandboxMove(uci);
+}
+
+// FEN for the set-up position. Castling rights are granted only where a king
+// and rook still sit on their home squares; the server validates the rest.
+function setupFen() {
+  let fen = "";
+  for (let r = 8; r >= 1; r--) {
+    let empty = 0;
+    for (let f = 0; f < 8; f++) {
+      const ch = S_MAP["abcdefgh"[f] + r];
+      if (ch) { if (empty) { fen += empty; empty = 0; } fen += ch; }
+      else empty++;
+    }
+    if (empty) fen += empty;
+    if (r > 1) fen += "/";
+  }
+  let c = "";
+  if (S_MAP.e1 === "K") { if (S_MAP.h1 === "R") c += "K"; if (S_MAP.a1 === "R") c += "Q"; }
+  if (S_MAP.e8 === "k") { if (S_MAP.h8 === "r") c += "k"; if (S_MAP.a8 === "r") c += "q"; }
+  return `${fen} ${$("sSideSel").value} ${c || "-"} - 0 1`;
+}
+
+async function enterPlay() {
+  const fen = setupFen();
+  try {
+    const r = await fetch("/api/board/validate?fen=" + encodeURIComponent(fen));
+    const v = await r.json();
+    if (!v.valid) { sNote("⚠ " + v.reason); return; }
+    S_ENGINE_OK = !!v.engine_available;
+    S_MODE = "play"; S_FEN = fen; S_SEL = null; S_HIST = [];
+    renderSandbox(); renderSHistory();
+    if (v.game_over) sNote(v.game_over.text);
+    else $("sFeedback").innerHTML = `<div class="hintnote">${
+      S_ENGINE_OK ? "Make a move for either side — Stockfish grades each one."
+        : "⚙ Stockfish isn't installed, so moves are applied but not graded."}</div>`;
+  } catch (e) {
+    sNote("⚠ " + e.message);
+  }
+}
+
+function enterSetup() {
+  S_MODE = "setup";
+  S_MAP = fenPieces(S_FEN);
+  $("sSideSel").value = S_FEN.split(" ")[1] === "b" ? "b" : "w";
+  S_SEL = null;
+  renderSandbox();
+}
+
+async function submitSandboxMove(uci) {
+  S_BUSY = true;
+  const before = S_FEN;
+  const whiteMoved = before.split(" ")[1] === "w";
+  $("sStatus").textContent = S_ENGINE_OK ? "Grading…" : "";
+  try {
+    const r = await fetch(`/api/board/move?fen=${encodeURIComponent(before)}&move=${uci}`);
+    const g = await r.json();
+    if (!r.ok) {
+      sNote((g && g.detail) || "Illegal move — try again.");
+      S_SEL = null; renderSBoard();
+      return;
+    }
+    S_SEL = null;
+    S_FEN = g.new_fen;
+    renderSBoard();
+    const ok = !g.graded || ["Best", "Excellent", "Good", "Book"].includes(g.cls);
+    drawArrowsOn($("sboard"),
+      [{ from: g.uci.slice(0, 2), to: g.uci.slice(2, 4), color: ok ? "#7cc66e" : "#e0934a" }],
+      S_FLIP);
+    renderSandboxFeedback(g, whiteMoved);
+    pushSHistory(g, before, whiteMoved);
+    updateSandboxBar();
+    if (g.game_over) $("sStatus").textContent = g.game_over.text;
+    else $("sStatus").textContent = g.check ? "Check!" : "";
+  } catch (e) {
+    sNote("⚠ " + e.message);
+  } finally {
+    S_BUSY = false;
+  }
+}
+
+function renderSandboxFeedback(g, whiteMoved) {
+  if (g.game_over) {
+    $("sFeedback").innerHTML = `
+      <div class="fbhead"><span class="tag cls-Best">${g.san}</span></div>
+      <div class="fbbody"><b>${g.game_over.text}</b> Press ↶ Undo to explore another
+        continuation, or ✎ Edit board to start again.</div>`;
+    return;
+  }
+  if (!g.graded) {
+    $("sFeedback").innerHTML = `<div class="fbbody"><b>${g.san}</b> played.${
+      S_ENGINE_OK ? "" : " Install Stockfish to have moves graded."}</div>`;
+    return;
+  }
+  // eval_after is from the mover's perspective; show it as White's.
+  const evW = (whiteMoved ? g.eval_after : -g.eval_after) / 100;
+  const line = g.best_line && g.best_line.length
+    ? `<div class="fbprinciple"><b>Engine line:</b> ${g.best_line.join(" ")}</div>` : "";
+  $("sFeedback").innerHTML = `
+    <div class="fbhead"><span class="tag cls-${g.cls}">${g.cls}</span> <b>${g.played_san}</b>
+      <span class="fbeval">eval ${evW >= 0 ? "+" : ""}${evW.toFixed(1)} (White)</span></div>
+    <div class="fbbody">${g.comment}</div>${line}`;
+}
+
+function pushSHistory(g, before, whiteMoved) {
+  const moveNo = parseInt(before.split(" ")[5], 10) || 1;
+  S_HIST.push({
+    label: `${moveNo}${whiteMoved ? "." : "…"} ${g.san}`,
+    cls: g.graded ? g.cls : null,
+    fenBefore: before,
+    feedback: $("sFeedback").innerHTML,
+  });
+  renderSHistory();
+}
+
+function renderSHistory(selIdx = S_HIST.length - 1) {
+  $("sHistory").innerHTML = S_HIST.map((h, i) =>
+    `<span class="hmv${i === selIdx ? " on" : ""}" data-i="${i}">${
+      h.cls ? `<span class="ic cls-${h.cls}"></span>` : ""}${h.label}</span>`).join("");
+  $("sHistory").querySelectorAll(".hmv").forEach((el) => el.onclick = () => {
+    const h = S_HIST[+el.dataset.i];
+    $("sFeedback").innerHTML = h.feedback;
+    renderSHistory(+el.dataset.i);
+  });
+}
+
+function bindSandbox() {
+  $("sStart").onclick = () => { S_MAP = fenPieces(START_FEN); $("sSideSel").value = "w"; renderSBoard(); };
+  $("sClear").onclick = () => { S_MAP = {}; renderSBoard(); };
+  $("sFenLoad").onclick = () => {
+    const f = $("sFenIn").value.trim();
+    if (!f) return;
+    S_MAP = fenPieces(f);
+    const side = f.split(/\s+/)[1];
+    if (side === "w" || side === "b") $("sSideSel").value = side;
+    renderSBoard();
+  };
+  $("sPlayBtn").onclick = enterPlay;
+  $("sEdit").onclick = enterSetup;
+  $("sFlip").onclick = () => { S_FLIP = !S_FLIP; renderSBoard(); };
+  $("sUndo").onclick = () => {
+    const last = S_HIST.pop();
+    if (!last) return;
+    S_FEN = last.fenBefore;
+    S_SEL = null;
+    renderSBoard(); renderSHistory(); updateSandboxBar();
+    $("sStatus").textContent = "";
+    $("sFeedback").innerHTML = `<div class="hintnote">Move undone — it's ${
+      S_FEN.split(" ")[1] === "w" ? "White" : "Black"}'s turn again.</div>`;
+  };
+  $("sFenOut").onclick = () => {
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(S_FEN);
+      $("sStatus").textContent = "FEN copied";
+      setTimeout(() => { if ($("sStatus").textContent === "FEN copied") $("sStatus").textContent = ""; }, 1200);
+    }
+  };
+}
 
 // Allow ?u=username deep links.
 const pre = new URLSearchParams(location.search).get("u");

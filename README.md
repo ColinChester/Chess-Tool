@@ -65,6 +65,22 @@ full move-by-move breakdown powered by Stockfish (depth 14):
 - **plain-language explanations** for the key moves (what Stockfish preferred,
   the eval swing it caused, and whether it hung material).
 
+### Practice — early/mid-game drills
+
+A standalone **Practice** tab teaches opening/middlegame fundamentals (center,
+development, king safety, common plans) as a curated guide, then drills them:
+you're shown a position and asked to find the right idea, your move is graded
+by Stockfish, and you get a hint / retry / next-position flow with a running
+score. No chess.com account needed — drill FENs are generated from short,
+known-legal move sequences. See [`chessstats/practice.py`](chessstats/practice.py).
+
+### Board — analysis sandbox
+
+A **Board** tab is a free-form analysis board: set up any position with
+drag-and-drop pieces (or paste a FEN), pick the side to move, then play it out
+with full legal-move validation and game-over detection (checkmate, stalemate,
+insufficient material, etc.).
+
 ### Background pre-warming
 
 When you load a report, the app immediately starts analyzing your most recent
@@ -131,6 +147,16 @@ present, the app still runs and disables the deep-analysis endpoints.
   → `{available, total, cached, warming}` — how many recent games are engine-cached.
 - `GET /api/review?username=NAME&uuid=GAME_UUID&depth=14`
   → move-by-move review: classified moves, engine best move + line, evals, explanations.
+- `GET /api/practice`
+  → the curated fundamentals guide + drill positions (no account needed).
+- `GET /api/practice/grade?fen=FEN&move=e2e4&depth=14`
+  → grades a move (UCI) played from a drill position using Stockfish.
+- `GET /api/board/validate?fen=FEN`
+  → legality/game-over check for a sandbox position.
+- `GET /api/board/move?fen=FEN&move=e2e4&depth=12`
+  → applies a move (UCI) on the analysis board server-side (handles castling,
+  en passant, promotion) and returns the new FEN, check/game-over state, and
+  an engine grade for the move when Stockfish is available.
 
 ## Project layout
 
@@ -142,7 +168,8 @@ chessstats/
   analysis.py           the six-skill statistical engine + tips
   details.py            per-skill drill-down panels + endgame analysis
   engine.py             Stockfish: per-game eval, caching, and game review
-static/                 dashboard (HTML/CSS/JS, Chart.js)
+  practice.py           curated fundamentals guide + drill positions
+static/                 dashboard (HTML/CSS/JS, Chart.js) — Analysis / Practice / Board tabs
 .cache/engine/          per-game engine results (auto-created)
 ```
 

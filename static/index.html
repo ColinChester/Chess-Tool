@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Chess Stats — your chess.com coach</title>
-  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="stylesheet" href="/static/style.css?v=3" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
 <body>
@@ -35,6 +35,7 @@
   <nav class="tabs">
     <button id="tabAnalysis" class="tab active">Analysis</button>
     <button id="tabPractice" class="tab">Practice</button>
+    <button id="tabBoard" class="tab">Board</button>
   </nav>
 
   <main id="main">
@@ -139,6 +140,69 @@
       </div>
     </section>
 
+    <!-- analysis board sandbox -->
+    <section id="sandbox" class="hidden">
+      <h1 class="practicehead">Analysis board</h1>
+      <p class="practiceintro">Set up any position — or keep the starting one — then play
+        moves for both sides. Stockfish grades every move as it's played.</p>
+
+      <div class="card drillcard">
+        <div class="drillbar">
+          <span id="sModeLabel" class="drillcounter">Setup</span>
+          <span id="sTurn" class="drilltheme"></span>
+          <span id="sStatus" class="drillscore"></span>
+        </div>
+        <div class="drillbody">
+          <div class="drillleft">
+            <div id="sboard" class="board pboard"></div>
+
+            <!-- setup-mode controls -->
+            <div id="sSetup">
+              <div id="sPalette" class="palette"></div>
+              <div class="setuprow">
+                <label>Side to move:
+                  <select id="sSideSel">
+                    <option value="w">White</option>
+                    <option value="b">Black</option>
+                  </select>
+                </label>
+                <button id="sStart" class="btn-ghost">Start position</button>
+                <button id="sClear" class="btn-ghost">Empty board</button>
+              </div>
+              <div class="setuprow">
+                <input id="sFenIn" type="text" placeholder="…or paste a FEN" spellcheck="false" />
+                <button id="sFenLoad" class="btn-ghost">Load</button>
+              </div>
+              <div class="setuprow">
+                <button id="sPlayBtn" class="btn-primary" style="margin-left:0">▶ Play from here</button>
+              </div>
+            </div>
+
+            <!-- play-mode controls -->
+            <div id="sPlayCtl" class="hidden">
+              <div class="setuprow">
+                <button id="sUndo" class="btn-ghost">↶ Undo</button>
+                <button id="sFlip" class="btn-ghost">⇅ Flip</button>
+                <button id="sEdit" class="btn-ghost">✎ Edit board</button>
+              </div>
+              <div class="setuprow">
+                <span id="sFenOut" class="fenout" title="Current FEN — click to copy"></span>
+              </div>
+            </div>
+          </div>
+
+          <div class="drillright">
+            <div id="sFeedback" class="drillfeedback">
+              <div class="hintnote">Build a position with the palette (or keep the starting
+                position), press <b>Play from here</b>, then make moves for either side —
+                each one gets a Stockfish verdict as it's played.</div>
+            </div>
+            <div id="sHistory" class="shistory"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <!-- game review overlay -->
     <div id="review" class="review hidden">
       <div class="reviewbar">
@@ -185,6 +249,6 @@
     </div>
   </main>
 
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=3"></script>
 </body>
 </html>

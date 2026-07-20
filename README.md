@@ -106,6 +106,22 @@ python app.py            # or: uvicorn app:app --reload
 Open <http://127.0.0.1:8000>, enter a username, click **Analyze**.
 Deep-link: `http://127.0.0.1:8000/?u=YOUR_USERNAME`.
 
+## Deploy (Docker)
+
+The included `Dockerfile` bundles **Stockfish**, so the engine features work out
+of the box. The server binds `0.0.0.0` and reads the listen port from `$PORT`,
+which is what most hosts inject.
+
+```bash
+docker build -t chess-stats .
+docker run -p 8000:8000 chess-stats     # then open http://127.0.0.1:8000
+```
+
+This image runs on any host that builds from a Dockerfile (e.g. Hugging Face
+Spaces, Render, Fly.io). The on-disk engine cache (`.cache/`) is ephemeral on
+such hosts and is simply recomputed after a restart. If Stockfish ever isn't
+present, the app still runs and disables the deep-analysis endpoints.
+
 ## API
 
 - `GET /api/report?username=NAME&limit=60&time_class=blitz,rapid&engine=false`

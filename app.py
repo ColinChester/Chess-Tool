@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
+import chess
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -258,6 +259,114 @@ def practice_grade(
     return result
 
 
+def _fen_error(board: chess.Board) -> Optional[str]:
+    """Human-readable reason a set-up position can't be played, or None."""
+    status = board.status()
+    if status == chess.STATUS_VALID:
+        return None
+    checks = [
+        (chess.STATUS_NO_WHITE_KING, "White needs a king."),
+        (chess.STATUS_NO_BLACK_KING, "Black needs a king."),
+        (chess.STATUS_TOO_MANY_KINGS, "Each side can only have one king."),
+        (chess.STATUS_TOO_MANY_WHITE_PIECES, "White has more than 16 pieces."),
+        (chess.STATUS_TOO_MANY_BLACK_PIECES, "Black has more than 16 pieces."),
+        (chess.STATUS_TOO_MANY_WHITE_PAWNS, "White has more than 8 pawns."),
+        (chess.STATUS_TOO_MANY_BLACK_PAWNS, "Black has more than 8 pawns."),
+        (chess.STATUS_PAWNS_ON_BACKRANK, "Pawns can't stand on the first or eighth rank."),
+        (chess.STATUS_OPPOSITE_CHECK,
+         "The side not to move is in check — switch the side to move."),
+        (chess.STATUS_TOO_MANY_CHECKERS, "This check isn't possible."),
+        (chess.STATUS_IMPOSSIBLE_CHECK, "This check isn't possible."),
+    ]
+    for flag, msg in checks:
+        if status & flag:
+            return msg
+    return "That position isn't playable."
+
+
+def _game_over_info(board: chess.Board) -> Optional[dict]:
+    """{"reason", "winner", "text"} if the game is over at `board`, else None."""
+    outcome = board.outcome()
+    if outcome is None:
+        return None
+    reason = outcome.termination.name.replace("_", " ").lower()
+    winner = None if outcome.winner is None else \
+        ("white" if outcome.winner == chess.WHITE else "black")
+    text = (f"Checkmate — {winner.capitalize()} wins!" if winner
+            else f"Draw by {reason}.")
+    return {"reason": reason, "winner": winner, "text": text}
+
+
+@app.get("/api/board/validate")
+def board_validate(fen: str = Query(..., min_length=10)):
+    """Check that a manually set-up position is playable (the sandbox board)."""
+    try:
+        board = chess.Board(fen)
+    except Exception:
+        return {"valid": False, "reason": "Could not read that FEN."}
+    reason = _fen_error(board)
+    if reason:
+        return {"valid": False, "reason": reason}
+    return {
+        "valid": True,
+        "turn": "white" if board.turn == chess.WHITE else "black",
+        "game_over": _game_over_info(board),
+        "engine_available": EngineAnalyzer.create() is not None,
+    }
+
+
+@app.get("/api/board/move")
+def board_move(
+    fen: str = Query(..., min_length=10),
+    move: str = Query(..., min_length=4, max_length=5, description="UCI, e.g. e2e4"),
+    depth: int = Query(12, ge=8, le=20),
+):
+    """Play a move on the sandbox board: apply it server-side (so castling,
+    en passant and promotion stay correct) and have Stockfish grade it."""
+    try:
+        board = chess.Board(fen)
+    except Exception:
+        raise HTTPException(status_code=422, detail="Could not read that position.")
+    reason = _fen_error(board)
+    if reason:
+        raise HTTPException(status_code=422, detail=reason)
+    if board.is_game_over():
+        raise HTTPException(status_code=409, detail="The game is already over.")
+
+    try:
+        mv = chess.Move.from_uci(move)
+    except Exception:
+        raise HTTPException(status_code=422, detail="Could not read that move.")
+    # Auto-promote to a queen if the player didn't specify a promotion piece.
+    if mv not in board.legal_moves and len(move) == 4:
+        promo = chess.Move.from_uci(move + "q")
+        if promo in board.legal_moves:
+            mv = promo
+    if mv not in board.legal_moves:
+        raise HTTPException(status_code=422, detail="That isn't a legal move here.")
+
+    san = board.san(mv)
+    after = board.copy()
+    after.push(mv)
+    out = {
+        "san": san, "uci": mv.uci(), "new_fen": after.fen(),
+        "turn": "white" if after.turn == chess.WHITE else "black",
+        "check": after.is_check(),
+        "game_over": _game_over_info(after),
+        "graded": False,
+    }
+
+    # Grade with the engine unless it's unavailable or the move ended the game
+    # (a game-ending move needs no grade, and engines can't search a finished game).
+    analyzer = EngineAnalyzer.create()
+    if analyzer is not None and out["game_over"] is None:
+        result = analyzer.grade_move(fen, mv.uci(), depth=depth)
+        if not result.get("error"):
+            out.update(result)
+            out["graded"] = True
+    return out
+
+
 def _extract_ratings(stats: dict) -> Dict[str, dict]:
     out = {}
     for key in ("chess_blitz", "chess_rapid", "chess_bullet", "chess_daily"):
@@ -280,5 +389,11 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
 if __name__ == "__main__":
+    import os
+
     import uvicorn
-    uvicorn.run("app:app", host="127.0.0.1", port=8000, reload=False)
+
+    # Bind to all interfaces inside a container; hosts inject the port via $PORT.
+    host = os.environ.get("HOST", "127.0.0.1")
+    port = int(os.environ.get("PORT", "8000"))
+    uvicorn.run("app:app", host=host, port=port, reload=False)

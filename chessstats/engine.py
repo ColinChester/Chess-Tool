@@ -16,10 +16,13 @@ Enable: `brew install stockfish` (or set STOCKFISH_PATH).
 """
 from __future__ import annotations
 
+import atexit
 import hashlib
 import json
 import os
 import shutil
+import threading
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -29,6 +32,38 @@ import chess
 from .pgn import ParsedGame
 
 CACHE_DIR = Path(__file__).resolve().parent.parent / ".cache" / "engine"
+
+# Stockfish defaults to 1 thread / 16 MB hash, which wastes most machines.
+# The shared (latency-sensitive) engine gets every core and a big hash; each
+# bulk worker is single-threaded, and the pool leaves one core for the server.
+_CPUS = os.cpu_count() or 2
+_SHARED_HASH_MB = 256
+_BULK_HASH_MB = 64
+
+# One long-lived engine process serves review/grade requests, guarded by a
+# lock (SimpleEngine is not safe for concurrent use). Respawned if it dies,
+# and closed at interpreter exit so shutdown doesn't hang on its I/O thread.
+_SHARED_LOCK = threading.Lock()
+_SHARED_ENGINE = None
+
+
+def _close_shared_engine() -> None:
+    global _SHARED_ENGINE
+    with _SHARED_LOCK:
+        if _SHARED_ENGINE is not None:
+            try:
+                _SHARED_ENGINE.close()
+            except Exception:
+                pass
+            _SHARED_ENGINE = None
+
+
+# SimpleEngine's I/O thread is non-daemon, and plain atexit handlers run only
+# after non-daemon threads are joined — too late. threading's hook runs first.
+try:
+    threading._register_atexit(_close_shared_engine)
+except AttributeError:  # Python < 3.9
+    atexit.register(_close_shared_engine)
 
 # Centipawn-loss thresholds for classifying a move (chess.com / Lichess-ish).
 INACCURACY = 50
@@ -228,6 +263,34 @@ class EngineAnalyzer:
         except Exception:
             return None
 
+    # -- engine processes --------------------------------------------------
+    def _open(self, threads: int, hash_mb: int):
+        engine = self._chess_engine.SimpleEngine.popen_uci(self.path)
+        try:
+            engine.configure({"Threads": threads, "Hash": hash_mb})
+        except Exception:
+            pass  # engine build without these options; run with its defaults
+        return engine
+
+    @contextmanager
+    def _shared_engine(self):
+        """The persistent fully-threaded engine, for single-game review and
+        drill grading. Serializes callers; recreated on the next request if
+        anything goes wrong with the process."""
+        global _SHARED_ENGINE
+        with _SHARED_LOCK:
+            if _SHARED_ENGINE is None:
+                _SHARED_ENGINE = self._open(threads=_CPUS, hash_mb=_SHARED_HASH_MB)
+            try:
+                yield _SHARED_ENGINE
+            except Exception:
+                try:
+                    _SHARED_ENGINE.close()
+                except Exception:
+                    pass
+                _SHARED_ENGINE = None
+                raise
+
     # -- cache -------------------------------------------------------------
     def _cache_key(self, g: ParsedGame) -> str:
         raw = g.uuid or g.url or "".join(m.san for m in g.moves)
@@ -334,17 +397,46 @@ class EngineAnalyzer:
             todo.append(g)
 
         if todo:
-            engine = self._chess_engine.SimpleEngine.popen_uci(self.path)
-            try:
-                for g in todo:
-                    ge = self._eval_game(engine, g)
-                    results[g.uuid] = ge
-                    try:
-                        self._cache_path(g).write_text(json.dumps(ge.to_dict()))
-                    except Exception:
-                        pass
-            finally:
-                engine.quit()
+            # Games are independent, so fan out across single-threaded engine
+            # processes — one per core, minus one left for the web server.
+            workers = min(len(todo), max(1, _CPUS - 1))
+            queue = iter(todo)
+            queue_lock = threading.Lock()
+            results_lock = threading.Lock()
+
+            def worker():
+                engine = self._open(threads=1, hash_mb=_BULK_HASH_MB)
+                try:
+                    while True:
+                        with queue_lock:
+                            g = next(queue, None)
+                        if g is None:
+                            return
+                        try:
+                            ge = self._eval_game(engine, g)
+                        except Exception:
+                            # Skip the game; respawn in case the process died.
+                            try:
+                                engine.close()
+                            except Exception:
+                                pass
+                            engine = self._open(threads=1, hash_mb=_BULK_HASH_MB)
+                            continue
+                        with results_lock:
+                            results[g.uuid] = ge
+                        try:
+                            self._cache_path(g).write_text(json.dumps(ge.to_dict()))
+                        except Exception:
+                            pass
+                finally:
+                    engine.quit()
+
+            threads = [threading.Thread(target=worker, daemon=True)
+                       for _ in range(workers)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
         return results
 
     # -- single-game deep review ------------------------------------------
@@ -365,12 +457,11 @@ class EngineAnalyzer:
             replay.push(mv)
         n = len(moves)
 
-        engine = self._chess_engine.SimpleEngine.popen_uci(self.path)
         white_eval: List[int] = []
         white_mate: List[Optional[int]] = []   # signed mate distance, White POV
         best_move: List[Optional[chess.Move]] = []
         pvs: List[List[chess.Move]] = []
-        try:
+        with self._shared_engine() as engine:
             board = chess.Board()
             for i in range(n + 1):
                 if board.is_game_over():
@@ -392,8 +483,6 @@ class EngineAnalyzer:
                     pvs.append(pv[:6])
                 if i < n:
                     board.push(moves[i])
-        finally:
-            engine.quit()
 
         out_moves = []
         counts = {c: 0 for c in
@@ -507,8 +596,7 @@ class EngineAnalyzer:
             return {"error": "That isn't a legal move here.", "illegal": True}
 
         mover_white = board.turn == chess.WHITE
-        engine = self._chess_engine.SimpleEngine.popen_uci(self.path)
-        try:
+        with self._shared_engine() as engine:
             info = engine.analyse(board, self._chess_engine.Limit(depth=depth))
             before = info["score"].white().score(mate_score=CLAMP) or 0
             pv = list(info.get("pv", []))
@@ -532,8 +620,6 @@ class EngineAnalyzer:
             after = info2["score"].white().score(mate_score=CLAMP) or 0
             mate_after = info2["score"].white().mate()
             opp_pv = list(info2.get("pv", []))[:6]
-        finally:
-            engine.quit()
 
         before_c, after_c = _clamp(before), _clamp(after)
         loss = max(0, (before_c - after_c) if mover_white else (after_c - before_c))

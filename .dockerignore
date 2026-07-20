@@ -1,0 +1,17 @@
+# Version control / project metadata
+.git
+.gitignore
+.claude
+
+# Python caches and local virtualenv
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Runtime engine cache (regenerated inside the container)
+.cache/
+
+# Docs / editor cruft
+*.md
+.DS_Store
